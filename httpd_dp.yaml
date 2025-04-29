@@ -1,0 +1,198 @@
+
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: hyper-ultra-httpd-pdb
+  namespace: tenant-prod
+spec:
+  minAvailable: 80%
+  selector:
+    matchLabels:
+      app: hyper-ultra-httpd
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: super-critical-priority
+value: 1000000000
+globalDefault: false
+description: "Top priority workload"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hyper-ultra-httpd
+  namespace: tenant-prod
+  labels:
+    app: hyper-ultra-httpd
+spec:
+  replicas: 10
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 5
+      maxUnavailable: 2
+  selector:
+    matchLabels:
+      app: hyper-ultra-httpd
+  template:
+    metadata:
+      labels:
+        app: hyper-ultra-httpd
+        istio-injection: enabled
+        spiffe.io/spiffeid: spiffe://tenant-prod/hyper-ultra-httpd
+      annotations:
+        sidecar.istio.io/rewriteAppHTTPProbers: "true"
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8090"
+        linkerd.io/inject: enabled
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      serviceAccountName: spiffe-agent
+      schedulerName: ultra-scheduler
+      runtimeClassName: kata-fc
+      priorityClassName: super-critical-priority
+      terminationGracePeriodSeconds: 45
+      dnsPolicy: ClusterFirstWithHostNet
+      restartPolicy: Always
+      hostIPC: false
+      hostPID: false
+      automountServiceAccountToken: true
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: hyper-ultra-httpd
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 2000
+        seccompProfile:
+          type: Localhost
+          localhostProfile: "profiles/default-seccomp.json"
+        seLinuxOptions:
+          level: "s0:c123,c456"
+      initContainers:
+        - name: network-check
+          image: busybox
+          command: ['sh', '-c', 'until ping -c 1 kube-dns.kube-system.svc; do sleep 2; done']
+      containers:
+        - name: app
+          image: customregistry.local/httpd:secured-latest
+          ports:
+            - containerPort: 8090
+          readinessProbe:
+            grpc:
+              port: 8090
+          livenessProbe:
+            exec:
+              command:
+                - cat
+                - /tmp/healthy
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          envFrom:
+            - configMapRef:
+                name: httpd-env
+            - secretRef:
+                name: httpd-secrets
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "2Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+          volumeMounts:
+            - name: app-volume
+              mountPath: /var/www/html
+        - name: sidecar-logging
+          image: grafana/loki
+          ports:
+            - containerPort: 3100
+        - name: sidecar-metrics
+          image: prometheus/node-exporter
+          ports:
+            - containerPort: 9100
+        - name: jaeger-sidecar
+          image: jaegertracing/jaeger-agent
+          ports:
+            - containerPort: 6831
+      volumes:
+        - name: app-volume
+          ephemeral:
+            volumeClaimTemplate:
+              metadata:
+                labels:
+                  app: ephemeral
+              spec:
+                accessModes: [ "ReadWriteOnce" ]
+                resources:
+                  requests:
+                    storage: 1Gi
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: hpa-hyper-ultra-httpd
+  namespace: tenant-prod
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: hyper-ultra-httpd
+  minReplicas: 6
+  maxReplicas: 20
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 20
+          periodSeconds: 60
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: secure-hyper-ultra-httpd
+  namespace: tenant-prod
+spec:
+  podSelector:
+    matchLabels:
+      app: hyper-ultra-httpd
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              project: trusted
+      ports:
+        - protocol: TCP
+          port: 8090
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: hyper-ultra-httpd-vs
+  namespace: tenant-prod
+spec:
+  hosts:
+    - "hyper-httpd.tenant-prod.svc.cluster.local"
+  http:
+    - route:
+        - destination:
+            host: hyper-ultra-httpd
+            port:
+              number: 8090
+
