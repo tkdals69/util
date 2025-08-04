@@ -19,5 +19,6 @@ command_pack
 ## 📦 설치 및 사용 방법
 ```bash
 git clone https://github.com/tkdals69/util
-cd util/* /etc/bash_profile/
-source /etc/bash_profile/util/command_pack/docker
+cd util/* /etc/bash_completion.d/
+source /etc/bash_completion.d/docker
+source /etc/bash_completion.d/kubectl
