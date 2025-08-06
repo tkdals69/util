@@ -22,3 +22,12 @@ git clone https://github.com/tkdals69/util
 cd util/* /etc/bash_completion.d/
 source /etc/bash_completion.d/docker
 source /etc/bash_completion.d/kubectl
+
+
+## 방법 1. /etc/profile.d/bash_completion.sh 마지막에 수동 로딩 추가
+if [ -d /etc/bash_completion.d ]; then
+    for bcfile in /etc/bash_completion.d/*; do
+        [ -f "$bcfile" ] && . "$bcfile"
+    done
+fi
+
