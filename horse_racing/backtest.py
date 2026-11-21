@@ -27,6 +27,32 @@ def logloss_win(p, d):
     return float(-np.log(np.clip(p[d["won"].to_numpy() == 1], 1e-9, 1)).mean())
 
 
+TARGET_HIT = 0.75
+
+
+def choose_place_threshold(hold: pd.DataFrame, target_hit=0.75, min_bets=25):
+    """학습기간 홀드아웃(테스트 주 이전)에서 '경주 최고 p_place 말 연승' 적중률이
+    target 이상이 되는 가장 낮은 임계값. 못 미치면 표본 min_bets 이상 중 적중률 최고 임계값.
+    테스트 결과는 전혀 사용하지 않는다."""
+    k = hold["n_runners"].map(lambda n: 2 if n <= 7 else 3)
+    h = hold.assign(p_place=harville_place(hold["p_model"], hold["race_id"], k))
+    top = h.loc[h.groupby("race_id")["p_place"].idxmax()]
+    top = top[top["place_odds"] > 1.0]
+    cands = []
+    for thr in np.arange(0.40, 0.96, 0.01):
+        sel = top[top["p_place"] >= thr]
+        if len(sel) < min_bets:
+            break
+        cands.append(dict(hc_thr=round(float(thr), 2), hc_hold_hit=float(sel["placed"].mean()),
+                          hc_hold_roi=float((sel["placed"] * sel["place_odds"]).mean() - 1),
+                          hc_hold_n=int(len(sel))))
+    if not cands:
+        return 0.99, dict(hc_thr=0.99, hc_hold_hit=float("nan"), hc_hold_roi=float("nan"), hc_hold_n=0)
+    ok = [c for c in cands if c["hc_hold_hit"] >= target_hit]
+    best = ok[0] if ok else max(cands, key=lambda c: c["hc_hold_hit"])
+    return best["hc_thr"], best
+
+
 def walk_forward(df: pd.DataFrame, today: pd.Timestamp, weeks: int, min_hist_days=180):
     start = today - pd.Timedelta(days=7 * weeks)
     preds, logs = [], []
@@ -44,6 +70,7 @@ def walk_forward(df: pd.DataFrame, today: pd.Timestamp, weeks: int, min_hist_day
         test[["p_fund", "p_model"]] = m.predict(test)
         k = test["n_runners"].map(lambda n: 2 if n <= 7 else 3)
         test["p_place"] = harville_place(test["p_model"], test["race_id"], k)
+        test["hc_thr"], hc_info = choose_place_threshold(m.hold_pred_, target_hit=TARGET_HIT)
         test["week"] = f"W{w+1} {cut:%m/%d}~{end - pd.Timedelta(days=1):%m/%d}"
         preds.append(test)
         logs.append(dict(week=test["week"].iloc[0], train_rows=len(train), test_races=test["race_id"].nunique(),
@@ -52,10 +79,11 @@ def walk_forward(df: pd.DataFrame, today: pd.Timestamp, weeks: int, min_hist_day
                          ll_market=logloss_win(test["mkt_p"].to_numpy(), test),
                          ll_fund=logloss_win(test["p_fund"].to_numpy(), test),
                          ll_model=logloss_win(test["p_model"].to_numpy(), test),
-                         top_features=m.feature_importance(8).round(3).to_dict()))
+                         top_features=m.feature_importance(8).round(3).to_dict(), **hc_info))
         print(f"[{logs[-1]['week']}] 학습 {len(train):,}행 -> 테스트 {logs[-1]['test_races']}경주 "
               f"| logloss 시장 {logs[-1]['ll_market']:.4f} 펀더 {logs[-1]['ll_fund']:.4f} "
-              f"결합 {logs[-1]['ll_model']:.4f} | θ={m.theta_.round(2)}")
+              f"결합 {logs[-1]['ll_model']:.4f} | θ={m.theta_.round(2)} | 고적중 임계 {hc_info['hc_thr']:.2f}"
+              f"(홀드아웃 적중 {hc_info['hc_hold_hit']:.0%}, ROI {hc_info['hc_hold_roi']:+.1%}, {hc_info['hc_hold_n']}건)")
     return pd.concat(preds), logs
 
 
@@ -75,9 +103,12 @@ def main():
     ap.add_argument("--weeks", type=int, default=4)
     ap.add_argument("--history-days", type=int, default=760)
     ap.add_argument("--out", default="results")
+    ap.add_argument("--target-hit", type=float, default=0.75, help="고적중 전략 목표 적중률")
     a = ap.parse_args()
 
     today = pd.Timestamp(a.today)
+    global TARGET_HIT
+    TARGET_HIT = a.target_hit
     if a.fetch:
         from data import fetch_kra
         raw = fetch_kra((today - timedelta(days=a.history_days)).date(), (today - timedelta(days=1)).date())
@@ -116,7 +147,7 @@ def main():
 
     pd.set_option("display.width", 200, "display.max_columns", 20)
     fmt = summ.copy()
-    for c in ["적중률", "ROI", "P_ROI양수", "최대낙폭"]:
+    for c in ["경주적중률", "ROI", "P_ROI양수", "최대낙폭"]:
         fmt[c] = fmt[c].map(lambda v: f"{v:+.1%}" if c in ("ROI", "최대낙폭") else f"{v:.1%}")
     for c in ["총베팅", "총환수", "손익"]:
         fmt[c] = fmt[c].map(lambda v: f"{v:,.0f}")

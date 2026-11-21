@@ -51,12 +51,46 @@ def kelly_win(race: pd.DataFrame, bankroll: float, frac=0.25, cap=0.02, race_cap
     return [(i, "win", _round(bankroll * fi)) for i, fi in f.items() if _round(bankroll * fi) > 0]
 
 
+def favorite_place(race: pd.DataFrame, **_):
+    """비교 기준: 시장 1번 인기마 연승."""
+    i = race["win_odds"].idxmin()
+    return [(i, "place", UNIT)]
+
+
+def hc_place(race: pd.DataFrame, **_):
+    """고적중 연승: 경주에서 p_place 최고 말이 임계값 이상일 때만.
+    임계값(hc_thr)은 walk_forward 에서 학습기간 홀드아웃으로만 정한다."""
+    i = race["p_place"].idxmax()
+    if race.loc[i, "p_place"] >= race["hc_thr"].iloc[0] and race.loc[i, "place_odds"] > 1.0:
+        return [(i, "place", UNIT)]
+    return []
+
+
+def hc_dutch(race: pd.DataFrame, target=0.75, max_horses=4, **_):
+    """고적중 단승 더칭: 확률 높은 순으로 누적 p_model >= target 될 때까지 여러 마리를 사고,
+    어느 말이 와도 환수액이 같도록 stake ∝ 1/odds 로 나눈다."""
+    r = race.sort_values("p_model", ascending=False)
+    cum = r["p_model"].cumsum()
+    k = int((cum < target).sum()) + 1
+    if k > max_horses:
+        return []
+    pick = r.iloc[:k]
+    inv = 1 / pick["win_odds"]
+    if inv.sum() >= 1.0:
+        return []                     # 맞혀도 원금 이하(배당 합성 1배 이하)면 안 산다
+    stakes = UNIT * len(pick) * inv / inv.sum()
+    return [(i, "win", _round(st)) for i, st in stakes.items()]
+
+
 STRATEGIES = {
     "S0_인기마_고정": flat_favorite,
     "S1_모델1위_고정": flat_model_top,
     "S2_밸류단승_고정": value_win,
     "S3_밸류연승_고정": value_place,
     "S4_켈리단승_1/4": kelly_win,
+    "S5_인기마_연승": favorite_place,
+    "S6_고적중_연승": hc_place,
+    "S7_고적중_단승더칭": hc_dutch,
 }
 
 
@@ -94,7 +128,8 @@ def summarize(bets: pd.DataFrame, n_boot=2000, seed=0) -> pd.DataFrame:
         lo, hi = np.percentile(boots, [2.5, 97.5])
         curve = b["bankroll"].to_numpy()
         dd = (curve / np.maximum.accumulate(curve) - 1).min() if len(curve) else 0
-        out.append(dict(전략=name, 베팅수=len(b), 적중률=b["hit"].mean(), 총베팅=b["stake"].sum(),
+        race_hit = b.groupby("race_id")["hit"].any()
+        out.append(dict(전략=name, 베팅경주=len(race_hit), 경주적중률=race_hit.mean(), 베팅수=len(b), 총베팅=b["stake"].sum(),
                         총환수=b["ret"].sum(), 손익=b["ret"].sum() - b["stake"].sum(), ROI=roi,
                         ROI_95CI=f"[{lo:+.1%}, {hi:+.1%}]", P_ROI양수=float(np.mean(np.array(boots) > 0)),
                         평균배당=b["odds"].mean(), 최대낙폭=dd))

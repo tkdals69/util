@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from data import normalize
+from model import harville_place
 
 
 def make_synthetic(end, days=760, seed=7, takeout=0.20):
@@ -44,7 +45,9 @@ def make_synthetic(end, days=760, seed=7, takeout=0.20):
                 q = np.exp(view - view.max()); q /= q.sum()
                 q = q ** 0.9; q /= q.sum()
                 win_odds = np.maximum(1.0, np.round((1 - takeout) / q, 1))
-                place_odds = np.maximum(1.0, np.round((1 - takeout) / np.minimum(0.95, q * 2.6), 1))
+                kq = 2 if n <= 7 else 3
+                qp = harville_place(pd.Series(q), pd.Series(np.zeros(n)), pd.Series(np.full(n, kq)))
+                place_odds = np.maximum(1.0, np.round((1 - takeout) / qp, 1))
                 outcome = perf + rng.gumbel(0, 0.9, n)
                 order = np.empty(n, int); order[np.argsort(-outcome)] = np.arange(1, n + 1)
                 base = dist / 16.5

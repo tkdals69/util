@@ -92,6 +92,7 @@ class TwoStageModel:
                                            num_iteration=best_n), hold["race_id"])
         X = self._stage2_X(p_f, hold)
         self.theta_ = fit_clogit(X, hold["race_id"], hold["won"].to_numpy())
+        self.hold_pred_ = hold.assign(p_fund=p_f, p_model=apply_clogit(self.theta_, X, hold["race_id"]))
 
         # (2) 최종 1단계는 전체 학습기간으로 재학습
         self.lgb_ = self._fit_lgb(train, n_estimators=best_n)
